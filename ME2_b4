@@ -1,0 +1,1795 @@
+/*
+ * File:   main.c
+ * Author: Snap
+ *
+ * Created on February 20, 2017, 8:22 PM
+ */
+
+
+#include "xc.h"
+#include "math.h"
+#include "string.h"
+#include <stdlib.h>
+#include <libpic30.h>
+
+
+#pragma config FWDTEN=OFF, JTAGEN=OFF
+#pragma config POSCMOD=NONE, OSCIOFNC=ON, FCKSM=CSDCMD, FNOSC=FRCPLL 
+#pragma config PLL96MHZ=OFF, PLLDIV=NODIV
+#pragma config SOSCSEL=IO
+#pragma config I2C1SEL=PRI        
+        
+        
+#define DEB_MAX 10
+#define final 498
+#define BUFMAX 32
+
+void __attribute__((interrupt)) _CNInterrupt(void);
+void __attribute__ ((interrupt, no_auto_psv)) _ADC1Interrupt(void);
+void __attribute__((interrupt, auto_psv)) _MI2C1Interrupt(void);
+
+
+//void led_toggle(void);
+void check_row(void);
+void check_col(void);
+void resetCol(void);
+void keypadEvents(void);
+void wait(void);
+int get_key_press(void);
+void PWM_init(void);
+int get_input(void);
+int adjust_temp(int);
+void regulate_temp(int, float);
+//int getCurrentTemp(void);
+void ADC_init(void);
+void wnum(int);
+void LCDdisp(int);
+void sendtoLCD(int);
+void nextline(void);
+void delay(void);
+
+void moveLeft(void);
+void moveRight(void);
+void moveCursor(void);
+void clr(void);
+void wlet(char[]);
+void adjust_pwm(void);
+void print_long(long unsigned int);
+
+/*******I2C*******/
+void i2c_init(void);
+void i2c_start(void);
+void i2c_stop(void);
+void i2c_tx(int data);
+int i2c_rx(void);
+void wait_idle(void);
+void sendAck(void);
+void delay_saks (long millisecs);
+unsigned long hash(char *str);
+// data vars
+char indata[] = "CoE_115 is <3";
+char outdata[BUFMAX]; 
+
+/******RTC******/
+void getTimeFromRTC(int[]);
+
+// flags
+int idle = 1;
+int acked = 0;
+int rx_complete = 0;
+int tx_complete = 0;
+
+int ind;
+unsigned long temp = 0;
+unsigned long temp2 = 0;
+
+int key_pressed = 0; //keypad flag
+int col_press_id = 0;
+int row_press_id = 0;
+int pulse_width = 1;
+int adcvalue = 0;
+int i = 0;
+int j = 0;
+int W0 = 0;
+int W1 = 0;
+
+int curPos = 0;
+int eepromFull = 0; //eeprom flag
+
+
+
+/********************** LCD ***************/
+
+void print_char(char input[]){
+    int buff = 0;
+    int i = 0;
+    for(i=0; input[i]; i++) {
+        buff = input[i];
+        buff = buff & 0x00F0;
+        buff = buff >> 4;
+        LCDdisp(buff);
+        buff = input[i];
+        buff = buff & 0x000F;
+        LCDdisp(buff);
+    }
+    return;  
+}
+
+void print_long(long unsigned int input){
+    /**takes max of 16 digit int as input*/
+    int i = 15;
+    long unsigned int one_buff = 0;
+    int buff[16]= {0};
+    int send_buff = 0;
+    char zero[] = "0";
+    
+    /*special case when input is 0*/
+    if(input==0){
+        send_buff = zero[0];
+        send_buff = send_buff & 0x00F0;
+        send_buff = send_buff >> 4;
+        LCDdisp(send_buff);
+        send_buff = zero[0];
+        send_buff = send_buff & 0x000F;
+        LCDdisp(send_buff);
+        return;
+    }
+    
+    /*get the digits into the buff array*/
+    one_buff = input;
+    while(one_buff>0) {
+        buff[i] = one_buff % 10;
+        one_buff = one_buff/10;
+        i--;
+    }
+    i++; //offset
+    
+    /*convert each item in buff array to char and print*/
+    while(i <= 15) {
+        send_buff = buff[i] + zero[0];
+        send_buff = send_buff & 0x00F0;
+        send_buff = send_buff >> 4;
+        LCDdisp(send_buff);
+        send_buff = buff[i] + zero[0];
+        send_buff = send_buff & 0x000F;
+        LCDdisp(send_buff);
+        i++;
+    }
+    return;  
+}
+
+void printFloat(float input) {
+    /**prints a float with upto 3 decimal places in LCD
+     * assumes input is positive
+     */
+    
+    unsigned long int buff = floor(input);
+    
+    print_long(buff);
+    print_char(".");
+    buff = input*1000;
+    buff = floor(buff);
+    buff = buff%1000;
+    print_long(buff);
+    return;
+}
+
+
+void LCDdisp(W0){
+    LATB=W0;
+    LATBbits.LATB13=1;
+    LATBbits.LATB14=1;
+    ;
+    LATBbits.LATB14=0;
+    LATBbits.LATB13=0;
+    ;
+    delay_saks(2);
+    return;
+}
+
+void delay(void){
+    i=0x1000;
+    while (i != 0){
+        i--;
+    }
+    return;
+}
+
+void nextline(){
+    delay_saks(10);
+    W0=0xC;
+    sendtoLCD(W0);
+    W0=0x0;
+    sendtoLCD(W0);
+    delay_saks(10);  
+    return;
+}
+
+void firstline(){
+    delay();
+    W0=0x8;
+    sendtoLCD(W0);
+    W0=0x0;
+    sendtoLCD(W0);
+    delay();  
+    return;
+}
+
+void moveRight(){
+    delay();
+    W0=0x1;
+    sendtoLCD(W0);
+    W0=0x4;
+    sendtoLCD(W0);
+    delay();
+    return;
+}
+
+void moveLeft(){
+    delay();
+    W0=0x1;
+    sendtoLCD(W0);
+    W0=0x0;
+    sendtoLCD(W0);
+    delay();
+    return;
+}
+
+void moveCursor(){
+    int key = get_key_press();
+    if(key == 11) {
+        moveRight();
+    } else if(key == 10) {
+        moveLeft();
+    }
+    return;
+}
+
+void sendtoLCD(W0){
+    PORTB=W0;
+    ;
+    LATBbits.LATB14=1;
+    ;
+    LATBbits.LATB14=0;
+    ;
+    return;
+}
+
+
+
+void updateTemps(int current_temp, int target_temp) {
+    /*print current temp and target temp to LCD*/
+    clr();
+    print_long(current_temp);
+    nextline();
+    print_long(target_temp);
+    
+}
+
+void clr(){
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0x1;
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0x6;
+    sendtoLCD(W0);
+    delay();
+    return;
+}
+
+void LCDinit(){
+    TRISB=0x8F00;
+    AD1PCFG=0xFDEF;
+    
+    delay();
+    ;
+    delay();
+    
+    W0=0x3;
+    sendtoLCD(W0);
+    delay();
+    sendtoLCD(W0);
+    delay();
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x2;
+    delay();
+    sendtoLCD(W0);
+    delay();
+//------------------------------------------------------------------------------
+    W0=0x2;
+    sendtoLCD(W0);
+    W0=0x8;
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0x8;
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0x1;
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0x6;
+    sendtoLCD(W0);
+    delay();
+    
+    W0=0x0;
+    sendtoLCD(W0);
+    W0=0xF;
+    sendtoLCD(W0);
+    delay();
+//------------------------------------------------------------------------------
+}
+int adjust_temp(int target_temp) {
+    int key = get_key_press();
+    if ((key == 2) && (target_temp < 50)) {
+       return (target_temp + 1);
+    } else if ((key == 8) && (target_temp > 0)) {
+       return (target_temp - 1);
+    }
+    return target_temp;
+    
+}
+
+
+/***********************    others  ************8*/
+void __attribute__((interrupt)) _CNInterrupt(void){
+    int deb_ctr = 0; //debounce counter
+    
+    if ((!PORTAbits.RA0)||(!PORTAbits.RA1)||(!PORTAbits.RA2)||(!PORTAbits.RA3)){
+        /* Software debounce */
+        while (((!PORTAbits.RA0)||(!PORTAbits.RA1)||(!PORTAbits.RA2)||(!PORTAbits.RA3)) && (deb_ctr < DEB_MAX)){
+            deb_ctr++;
+        }
+        if (deb_ctr == DEB_MAX) {
+            check_col();
+        } else {
+            col_press_id = 0;
+            row_press_id = 0;
+        }
+    }
+    resetCol(); //reset col's
+    
+    /* Clear IRQ flag */
+    IFS1bits.CNIF = 0;  //interrupt flag status register
+}
+
+void resetCol() {
+    LATBbits.LATB7 = 0;  
+    LATBbits.LATB5 = 0;
+    LATBbits.LATB4 = 0;
+}
+
+
+void check_row(void) {
+    if (!PORTAbits.RA0) {
+        row_press_id = 1; //set flag
+    } else if (!PORTAbits.RA1) {
+        row_press_id = 2; //set flag
+    } else if (!PORTAbits.RA2) {
+        row_press_id = 3; //set flag
+    } else if (!PORTAbits.RA3) {
+        row_press_id = 4; //set flag
+    }
+    key_pressed = 1;
+    return;
+}
+
+void check_col(void) {
+
+        col_press_id = 0;
+
+        LATBbits.LATB7 = 0;  //reset col's
+        LATBbits.LATB5 = 1;
+        LATBbits.LATB4 = 1;
+        wait();
+        if ((!PORTAbits.RA0)||(!PORTAbits.RA1)||(!PORTAbits.RA2)||(!PORTAbits.RA3)) {
+            col_press_id = 3; //set flag
+            check_row();
+            return;
+        }
+
+        LATBbits.LATB7 = 1;  //reset col's
+        LATBbits.LATB5 = 0;
+        LATBbits.LATB4 = 1;
+        wait();
+        if ((!PORTAbits.RA0)||(!PORTAbits.RA1)||(!PORTAbits.RA2)||(!PORTAbits.RA3)) {
+            col_press_id = 2; //set flag
+            check_row();
+            return;
+        }
+
+        LATBbits.LATB7 = 1;  //reset col's
+        LATBbits.LATB5 = 1;
+        LATBbits.LATB4 = 0;
+        wait();
+        if ((!PORTAbits.RA0)||(!PORTAbits.RA1)||(!PORTAbits.RA2)||(!PORTAbits.RA3)) {
+            col_press_id = 1; //set flag
+            check_row();
+            return;
+        }
+        
+}
+
+void wait(void) {
+    int wait_time = 0;
+    while (wait_time < 5*DEB_MAX){
+        wait_time++;
+    }
+}
+
+int get_key_press(void) {
+    int led_seq = 0;
+    if (row_press_id == 1) {
+        if (col_press_id == 1) {
+            led_seq = 1;
+        } else if (col_press_id == 2) {
+            led_seq = 2;
+        } else if (col_press_id == 3) {
+            led_seq = 3;
+        }
+    } else if (row_press_id == 2) {
+        if (col_press_id == 1) {
+            led_seq = 4;
+        } else if (col_press_id == 2) {
+            led_seq = 5;
+        } else if (col_press_id == 3) {
+            led_seq = 6;
+        }
+    } else if (row_press_id == 3) {
+        if (col_press_id == 1) {
+            led_seq = 7;
+        } else if (col_press_id == 2) {
+            led_seq = 8;
+        } else if (col_press_id == 3) {
+            led_seq = 9;
+        }
+    } else if (row_press_id == 4) {
+        if (col_press_id == 1) {
+            led_seq = 10;
+        } else if (col_press_id == 2) {
+            led_seq = 0;
+        } else if (col_press_id == 3) {
+            led_seq = 11;
+        }
+    }
+    
+    return led_seq;
+}
+
+
+
+
+int get_input(void) {
+    int first_in = 0;
+    int sec_in = 0;
+    int wait_input = 2;
+    int final_input = 0;
+    int key = 0;
+   
+    
+    /*Get initial input*/
+    while (wait_input>=0) {
+        if ((col_press_id != 0) && (row_press_id != 0) ){
+            key = get_key_press();
+            if (wait_input == 2) {
+                first_in = key;
+                clr();
+                print_char("Target temp: ");
+                print_long(first_in);
+                wait_input--;
+            } else if (wait_input == 1) {
+                sec_in = key;
+                final_input = 10*first_in + sec_in;
+                clr();
+                print_char("Target temp: ");
+                print_long(final_input);
+                wait_input--;
+            } else if ((wait_input == 0) && (key == 10)) {
+                wait_input--;
+                return final_input;
+            }
+            
+            col_press_id = 0; //clear flag
+            row_press_id = 0; //clear flag 
+        }
+    }
+
+}
+
+
+
+void __attribute__ ((interrupt, no_auto_psv)) _ADC1Interrupt(void){
+    IEC0bits.AD1IE=0;//Disable interrupt
+    IFS0bits.AD1IF=0;//Clear flag
+    adcvalue = ADC1BUF0;
+    IEC0bits.AD1IE=1; //enable interrupt
+    IFS0bits.AD1IF=0;//clear interrupt flag
+}
+
+
+
+int my_floor(float input) {
+        return input;
+}
+void ADC_init(void){
+    //setup ADC configuration bits and TRISB
+    AD1PCFG=0xFDFF;
+    AD1CON1=0x20E4;
+    AD1CON2=0x0000;
+    AD1CON3=0x0201;
+    AD1CHS=0x0009;  //an9 used
+    AD1CSSL=0x0000;
+    TRISB=0x8000;
+    IEC0bits.AD1IE=1; //enable interrupt
+    IFS0bits.AD1IF=0;//clear interrupt flag
+    AD1CON1bits.ADON = 1; //turn on ADC
+}
+
+void keypadEvents() {
+    moveCursor();
+    
+    key_pressed = 0; //reset flag
+}
+/*****I2C******/
+void __attribute__((interrupt, auto_psv)) _MI2C1Interrupt(void){
+    
+   
+    if (!I2C1STATbits.ACKSTAT){  
+        acked = 1;
+    }
+    
+    if (I2C1STATbits.RBF){      
+        rx_complete = 1;
+    }
+    
+    if (!I2C1STATbits.TBF){     
+        tx_complete = 1;
+    }
+    if (!I2C1STATbits.IWCOL || !I2C1STATbits.BCL){    
+        idle = 1;
+    }   
+    
+    // Clear I2C interrupt flag
+    IFS1bits.MI2C1IF=0;
+}
+
+void reset_flags(){
+    idle = 1;
+    tx_complete = 0;
+    rx_complete = 0;
+    acked = 0;
+}
+
+void wait_idle(){
+    while (!idle){
+        // do nothing, just wait
+    }
+    reset_flags();
+}
+
+void delay_saks (long millisecs) {
+    // implement delay_saks
+    //#define final 498
+    int count;
+    int count2;
+    for (count2 = 0; count2 < millisecs; count2++){
+        for (count = 0; count < final; count++){
+        ;
+        ;
+        }
+    }
+    ;
+}
+
+
+void i2c_start(){
+    //wait until free
+    wait_idle();
+    //initiate start condition on SDA and SCL pins
+    I2C1CONbits.SEN=1;
+}
+
+void i2c_stop(){
+    //wait until free
+    wait_idle();
+    //initiate stop condition on SDA and SCL pins
+    I2C1CONbits.PEN=1;
+}
+
+void i2c_init(void){
+    // Configure GPIOs
+    TRISB=0x8700;
+    // ##### Interrupt-driven I2C configuration ########
+    // enable I2C interrupts
+    IEC1bits.MI2C1IE=1;
+    // clear interrupt flag for I2C
+    IFS1bits.MI2C1IF=0;
+    // ##### I2C configuration #########################
+    // refer to notes in Lab06 specs
+    I2C1CONbits.I2CSIDL=1;
+    I2C1CONbits.ACKDT=0;
+    I2C1BRG=4;
+    // enable I2C module
+    I2C1CONbits.I2CEN=1;
+}
+
+void i2c_tx(int data){
+    // wait until free
+    wait_idle();
+    // set flag to declare you're not free/idle
+    idle=0;
+    // load data for transmission over the I2C bus
+    I2C1TRN=data;
+    // wait until TX is complete
+    while(!tx_complete);
+    // wait until ACK is received
+    while(!acked);
+    // reset flags
+    reset_flags();
+}
+
+int i2c_rx(){
+    
+    int temp = 0;
+ 
+    // The lower 5 bits of I2CxCON must be '0' before attempting to set the RCEN bit. 
+    // This ensures the master logic is inactive.
+    I2C1CONbits.ACKEN=0;
+    I2C1CONbits.RCEN=0;
+    I2C1CONbits.PEN=0;
+    I2C1CONbits.RSEN=0;
+    I2C1CONbits.SEN=0;
+    // enable RX mode   
+    I2C1CONbits.RCEN=1;
+    // wait until free
+    wait_idle();
+    // set flag to declare you're not free/idle
+    idle=0;
+    // wait until RX is complete
+    while(!rx_complete);
+    // get our data, store in temp
+    temp=I2C1RCV;
+    // reset flags
+    reset_flags();
+    return temp;
+}
+
+unsigned long hash(char *str){
+        
+    unsigned long hash = 5381;
+    int c;
+
+    // djb2 hash algorithm
+    while (c = *str++)
+        hash = ((hash << 5) + hash) + c; 
+
+    return hash;
+}
+
+void sendAck() {
+    //wait_idle();
+    //idle = 0;
+    I2C1CONbits.ACKDT=0;    //set ack
+    delay_saks(1);
+    I2C1CONbits.ACKEN=1;
+    delay_saks(1);
+   // idle = 1;
+    return;
+}
+
+void sendNack() {
+    //wait_idle();
+    //idle = 0;
+    I2C1CONbits.ACKDT=1;    //set nack
+    delay_saks(10);
+    I2C1CONbits.ACKEN=1;
+    delay_saks(10);
+    I2C1CONbits.ACKDT=0;    //reset to ack
+    delay_saks(5);
+    //idle = 1;
+    return;
+}
+/*******RTC******/
+int getSM(int input) {
+    /**gets the raw input from RTC
+     * returns Sec and Min in int format
+     */
+    int buff = input;
+    
+    //get tens digit
+    buff = buff & 0x70;
+    buff = buff >> 4;
+    buff = buff * 10;
+    
+    //get ones digit
+    input = input & 0x0F;
+    
+    //combine
+    buff = buff + input;
+    
+    return buff;
+}
+
+int getHDM(int input) {
+    /** assumes input is in 24 hour format, input can also be Date or Month
+      * returns the hour, day or month in int format
+      */
+    int buff = input;
+    
+    //get the tens digit
+    buff = buff & 0x30;
+    buff = buff >> 4;
+    buff = buff * 10;
+    
+    //get the ones digit
+    input = input & 0x0F;
+    
+    //combine
+    buff = buff + input;
+    
+    return buff;
+}
+
+int getYear(int input) {
+    /** Input: year from RTC
+      * returns: year in int format
+      */
+    int buff = input;
+    
+    //get the tens digit
+    buff = buff & 0xF0;
+    buff = buff >> 4;
+    buff = buff * 10;
+    
+    //get the ones digit
+    input = input & 0x0F;
+    
+    //combine
+    buff = buff + input;
+    
+    return buff;
+}
+
+void getTimeFromRTC(int time[]) {
+    /**return: time with format ready for main() */
+    int buff = 1;
+    int ind = 0;
+    
+
+    //read date from RTC
+    // send I2C start sequence
+    //i2c_init();
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b11010000);
+    
+    // send EEPROM high address
+    i2c_tx(0x00);
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Read enabled
+    i2c_tx(0b11010001);
+    
+    
+    
+    while(ind<7)
+      {
+        // receive data
+        buff = i2c_rx();
+        time[ind] = buff;
+        // send ACK, but not on last byte
+        if(ind < 6) { 
+            sendAck();
+        }
+        
+        //print_long(ind);
+        ind++;
+      }
+    //send Nack
+    sendNack();
+   
+    // send I2C stop sequence
+    i2c_stop();
+    
+    //delay_saks(100);
+    
+   
+    //reformat the date from RTC
+    time[0] = getSM(time[0]);   //sec
+    time[1] = getSM(time[1]);   //min
+    time[2] = getHDM(time[2]);  //hour
+                                //day of the week
+    time[4] = getHDM(time[4]);  //date
+    time[5] = getHDM(time[5]);  //Month
+    time[6] = getYear(time[6]); //year
+    
+    return;
+}
+
+void convTime(int time[], unsigned long int timeStored) {
+    /**Converts the stored time in the EEPROM to time*/
+    unsigned long int buff = 0;
+    
+    time[0] = 0;   //sec
+    
+    buff = timeStored;
+    buff = buff >> 21;
+    buff = buff & 0x3F;
+    time[1] = buff;   //min
+    
+    buff = timeStored;
+    buff = buff >> 27;
+    time[2] = buff;  //hour
+    
+    time[3] = 1;    //day of the week
+    
+    buff = timeStored;
+    buff = buff >> 12;
+    buff = buff & 0x1F;
+    time[4] = buff;  //date
+    
+    buff = timeStored;
+    buff = buff >> 17;
+    buff = buff & 0xF;
+    time[5] = buff;  //Month
+    
+    buff = timeStored;
+    buff = buff & 0xFFF;
+    time[6] = buff; //year
+    
+    return;
+}
+
+
+
+
+
+
+unsigned long int getTime2Store(int time[]){
+    /**reformat the date for storage in eeprom
+     *input: time array,
+     *return: 32bit time2store in eeprom   
+     */
+    unsigned long int buff_long = 0;
+    unsigned long int time2store = 0;
+    
+    time2store = time[6];                       //insert year
+    buff_long = time[4];
+    time2store = (buff_long << 12) | time2store;  //insert day
+    buff_long = time[5];
+    time2store = (buff_long << 17) | time2store;  //insert month
+    buff_long = time[1];
+    time2store = (buff_long << 21) | time2store;  //insert minutes
+    buff_long = time[2];
+    time2store = (buff_long << 27) | time2store;  //insert hours
+   
+    return time2store;
+}
+
+unsigned long int getTemp2Store(float temp){
+    /**reformat the temp for storage in eeprom
+     *input: float tempp,
+     *return: 32bit temp2store in eeprom   
+     */
+    union fakeFloat{
+        float floating;
+        unsigned long int integer;
+    };
+
+    union fakeFloat buff;
+    
+    buff.floating = temp;
+    
+    return buff.integer;
+}
+
+float convTemp(unsigned long int input){
+    /**reformat the temp from eeprm to float
+     *input: int containing float bits,
+     *return: temp in float format   
+     */
+    union fakeFloat{
+        float floating;
+        unsigned long int integer;
+    };
+
+    union fakeFloat buff;
+    
+    buff.integer = input;
+    
+    return buff.floating;
+}
+
+void convTime2RTC(int time2RTC[], int time[]) {
+    /**converts time into RTC format ready for writing*/
+    int ind = 0;
+    int buff = 0;
+    for(ind=0; ind<7; ind++) {
+        time2RTC[ind] = time[ind]%10;
+        buff = time[ind]/10;
+        buff = buff << 4;
+        time2RTC[ind] = time2RTC[ind] | buff;
+    }
+    return;
+}
+void writeTime(int time[]) {
+    /**Writes the initial date to RTC
+     * input: data
+     */
+    int time2RTC[7] = {0};
+    
+    convTime2RTC(time2RTC, time);
+    
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b11010000);
+    
+    // send EEPROM high address
+    i2c_tx(0x00);
+    
+    
+    /* 
+    i2c_tx(0x00);   //sec
+    i2c_tx(time2RTC[1]);   //min
+    i2c_tx(time2RTC[2]);   //hour
+    i2c_tx(0x01);   //day of the week
+    i2c_tx(time2RTC[4]);   //date
+    i2c_tx(time2RTC[5]);   //Month
+    i2c_tx(time2RTC[6]);   //year
+    */
+    i2c_tx(0x00);   //sec
+    i2c_tx(0);   //min
+    i2c_tx(1);   //hour
+    i2c_tx(0x01);   //day of the week
+    i2c_tx(1);   //date
+    i2c_tx(1);   //Month
+    i2c_tx(0);   //year
+    
+    // send I2C stop sequence
+    i2c_stop();
+    
+    return;
+}
+
+
+void writeData(int time[], float temp, int adrs) {
+    /**Writes a data point to the EEPROM
+     * inputs: the 32bit time
+     *         the 32bit temp
+     *         the address in memory
+     */
+    
+    unsigned long int time2store = getTime2Store(time);
+    unsigned long int temp2store = getTemp2Store(temp);
+    int adrsHigh = 0;
+    int adrsLow = 0;
+    unsigned long int buff = 0;
+    int ind = 0;
+    /*light the LED
+    LATBbits.LATB11 = 0;
+    delay_saks(100);
+    LATBbits.LATB11 = 1;*/
+    
+    
+    /*getting the high and low addresses*/
+    adrsLow = adrs & 0xFF;
+    adrsHigh = adrs >> 8;
+    
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b10100000);
+    
+    // send EEPROM high address
+    i2c_tx(adrsHigh);
+    // send EEPROM low address
+    i2c_tx(adrsLow);
+    
+    
+    // send temp
+    for(ind=3; ind>=0; ind--){
+        buff = temp2store >> 8*ind;
+        buff = buff & 0x000000FF;
+        i2c_tx(buff);
+    }
+    
+    // send time; 
+    for(ind=3; ind>=0; ind--){
+        buff = time2store >> 8*ind;
+        buff = buff & 0xFF;
+        i2c_tx(buff);
+    }
+    
+    // send I2C stop sequence
+    
+    i2c_stop();
+    
+    delay_saks(5); //5ms delay_saks
+    
+    return;
+}
+
+void readData (int time[], float temp[], int adrs) {
+    /**Reads data from the eeprom and writes the data to dataBuff[]
+     * input: read address
+     *        unsigned long int array as data buffer
+     */
+    
+    unsigned long int tempFromEeprom = 0;
+    unsigned long int timeFromEeprom = 0;
+    unsigned long int buff = 0;
+    
+    int ind = 0;
+    int adrsHigh = 0;
+    int adrsLow = 0;
+    
+    /*getting the high and low addresses*/
+    adrsLow = adrs & 0xFF;
+    adrsHigh = adrs >> 8;
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b10100000);
+    
+    // send EEPROM high address
+    i2c_tx(adrsHigh);
+    
+    // send EEPROM low address
+    i2c_tx(adrsLow);
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Read enabled
+    i2c_tx(0b10100001);
+    
+    // receive temp
+    for(ind=3; ind>=0; ind--) {
+        buff = i2c_rx();
+        buff = buff << ind*8;
+        tempFromEeprom = tempFromEeprom | buff;
+        sendAck();
+    }
+    
+    
+    // receive time
+    for(ind=3; ind>=0; ind--) {
+        buff = i2c_rx();
+        buff = buff << ind*8;
+        timeFromEeprom = timeFromEeprom | buff;
+        
+        if(ind > 0) { 
+            sendAck();
+        }
+    }
+    
+    // send I2C stop sequence
+    delay_saks(10);
+    i2c_stop();
+    delay_saks(10);
+    
+    temp[0] = convTemp(tempFromEeprom);
+    convTime(time, timeFromEeprom);
+    
+    return;
+}
+
+void tranLeftState() {
+    /**does the appropriate transition for left states*/
+    int key = get_key_press();
+    if(key == 11) {
+                moveRight();
+                curPos++;
+            } else if(key == 10){
+                moveLeft();
+                moveLeft();
+                curPos = curPos - 2;
+            } else {
+                curPos++;
+            }
+}
+
+void tranRightState() {
+    int key = get_key_press();
+    if(key == 11) {
+                moveRight();
+                moveRight();
+                curPos = curPos + 2;
+            } else if(key == 10){
+                moveLeft();
+                curPos--;
+            } else {
+                moveRight();
+                curPos = curPos + 2;
+            }
+}
+
+
+void nextPos() {
+    /**decides the next cursor position depending on
+     * current position and key pressed 
+     * also updates curPos
+     */
+    
+    int key = get_key_press();
+    switch(curPos) {
+        case 0:                 //hour
+            if(key == 11) {
+                moveRight();
+                curPos++;
+            } else if(key == 10) {
+                ;   //do nothing
+            } else {
+                curPos++;
+            }
+            break;
+        case 1:
+            tranRightState();
+            break;
+        case 2:
+            break;
+        case 3:
+            tranLeftState();    //minute
+            break;
+        case 4:
+            tranRightState();
+            break;
+        case 5:
+            break;
+        case 6:
+            tranLeftState();    //month
+            break;
+        case 7:
+            tranRightState();
+            break;
+        case 8:
+            break;
+        case 9:
+            tranLeftState();    //date
+            break;
+        case 10:
+            if(key == 11) {
+                moveRight();
+                moveRight();
+                moveRight();
+                moveRight();
+                curPos = curPos + 4;
+            }else if(key == 10) {
+                moveLeft();
+                curPos--;
+            } else {
+                moveRight();
+                moveRight();
+                moveRight();
+                curPos = curPos + 4;
+            }
+            break;
+        case 11:
+            break;
+        case 12:
+            break;
+        case 13:
+            break;
+        case 14:                //year
+            if(key == 11) {
+                moveRight();
+                curPos++;
+            }else if(key == 10) {
+                moveLeft();
+                moveLeft();
+                moveLeft();
+                moveLeft();
+                curPos = curPos - 4;
+            } else {
+                curPos++;
+            }
+            break;
+        case 15:
+            tranRightState();
+            break;
+    }
+    return;
+}
+
+void updateInputTime(int time[]) {
+    /**Updates the time inputs*/
+    
+    //time[0]   sec
+    //time[1]   min
+    //time[2]   hour
+    //time[3]   day of the week
+    //time[4]   date
+    //time[5]   Month
+    //time[6]   year
+    
+    int key = get_key_press();
+    
+    switch(curPos) {
+        case 0:
+            time[2] = (time[2]%10) + key*10;
+            break;
+        case 1:
+            time[2] = time[2] - (time[2]%10) + key;
+            break;
+        case 2:
+            break;
+        case 3:
+            time[1] = (time[1]%10) + key*10;
+            break;
+        case 4:
+            time[1] = time[1] - (time[1]%10) + key;
+            break;
+        case 5:
+            break;
+        case 6:
+            time[5] = (time[5]%10) + key*10;;
+            break;
+        case 7:
+            time[5] = time[5] - (time[5]%10) + key;
+            break;
+        case 8:
+            break;
+        case 9:
+            time[4] = (time[4]%10) + key*10;
+            break;
+        case 10:
+            time[4] = time[4] - (time[4]%10) + key;
+            break;
+        case 11:
+            break;
+        case 12:
+            break;
+        case 13:
+            break;
+        case 14:
+            time[6] = (time[6]%10) + key*10;
+            break;
+        case 15:
+            time[6] = time[6] - (time[6]%10) + key;
+            break;
+        
+    }
+    return;
+}
+
+print2Digit(int input) {
+    /**prints two digit numbers with leading zeroes if necessary*/
+    if(input < 10) {
+        print_long(0);
+        print_long(input);
+    } else {
+        print_long(input);
+    }
+    return;
+}
+
+void printLatestState(int time[]) {
+    /**returns the LCD into last state*/
+    clr();
+    print2Digit(time[2]);   //hour
+    print_char(":");
+    print2Digit(time[1]);   //minutes
+    print_char(" ");
+    print2Digit(time[5]);   //month
+    print_char("/");
+    print2Digit(time[4]);   //date
+    print_char("/");
+    print_long(20);
+    print_long(time[6]);    //year
+    nextline();
+    print_char("HH:mm MM/DD/YYYY");
+    //delay_saks(10);
+    firstline();
+    //delay_saks(10);
+    return;
+} 
+
+void printData(int time[], float temp) {
+    /**prints date in first line
+     * prints temp in second line
+     */
+    
+    clr();
+    printTime(time);
+    nextline();
+    print_char("Temp: ");
+    printFloat(temp);
+    return;
+}
+
+void printTime(int time[]) {
+    /**prints time in HH:mm MM/DD/YYYY*/
+    print2Digit(time[2]);   //hour
+    print_char(":");
+    print2Digit(time[1]);   //minutes
+    print_char(" ");
+    print2Digit(time[5]);   //month
+    print_char("/");
+    print2Digit(time[4]);   //date
+    print_char("/");
+    print_long(20);
+    print2Digit(time[6]);    //year
+    return;
+} 
+
+void updateInputState(int finished[], int time[]) {
+    /**Updates the state and does the appropriate action 
+     * depending on the current state and key pressed
+     * also resets the key_pressed flag
+     */
+    
+    int key = get_key_press();
+    //get input and update state
+    if(!(key==10) && !(key==11)) {
+        print_long(key);
+        updateInputTime(time);   
+    }
+
+    nextPos();
+
+    key_pressed = 0;    //reset flag
+
+    //check if finished
+    if(curPos == 17) {
+
+        clr();
+        print_char("No=* , Yes=#");
+        nextline();
+        printTime(time);
+        while(!key_pressed);
+        key = get_key_press();
+
+        while((key!=10) && (key!=11)) {
+            key_pressed = 0;    //reset flag
+            while(!key_pressed);
+            key = get_key_press();
+        }
+
+        if(key == 11) {
+            finished[0] = 1;
+        } else {
+            printLatestState(time);
+            curPos = 0;
+        } 
+        key_pressed = 0;    //reset flag
+    }
+   
+    return;
+}
+
+void getInputTime(int time[]) {
+    /**controls the cursor and prompts during input of date
+     * also records data into time[]
+     * input: time[] data buff array
+     */
+    
+    int key = 0;
+    int finished[1] = {0};  //finished flag
+    
+    //print initial state and returns the cursor to start
+    print_char("__:__ __/__/20__");
+    nextline();
+    print_char("HH:mm MM/DD/YYYY");
+    firstline();
+    
+    
+    while(1) {
+        while(!key_pressed);
+        updateInputState(finished, time);
+        
+        if(finished[0]) {
+            return;
+        }
+    }
+
+}
+
+int getInputFreq(int time[]) {
+    /**polls for the input frequency*/
+    const char *options[3] = {"1 - 5 seconds   ", 
+                              "2 - 30 seconds  ",  
+                              "3 - 1 minute    "
+                              };
+    
+    
+    //freq loopup table
+    
+    int freqTable[3] = {5, 30, 60};
+    int freq = 60;
+    int key = 0;
+    resetKey();
+    clr();
+    print_char("_ select freq");
+    nextline();
+    printTime(time);
+    firstline();
+    
+    while(!key_pressed);
+    key = get_key_press();
+    
+    while(key!=11) {
+        key_pressed = 0;
+        while(!key_pressed);
+        key = get_key_press();
+        if(key!=11) {
+            freq = key;
+            if((key==1)||(key==2)||(key==3)) {
+                print_char(options[key-1]);
+                firstline();
+            }
+        }
+    }
+    
+    key_pressed = 0;
+    
+    return freqTable[freq-1];
+}
+
+
+
+void dataDisplayMode(int logTrack[]){
+    /**Displays data saved in eeprom*/
+    int key = 0;
+    int adrs = 0;
+    float temp[1] = {0};
+    int time[7] = {0, 0, 0, 1, 1, 1, 0};
+    
+    readData(time, temp, adrs);
+    printData(time, temp[0]);
+    
+    
+    while(!key_pressed);
+    key = get_key_press();
+    
+    while(key!=10) {
+        while(!key_pressed);
+        key = get_key_press();
+        if((key == 8) && (adrs > 0)) {
+            adrs = adrs - 8;
+            readData(time, temp, adrs);
+            printData(time, temp[0]);
+            
+        } else if((key == 2) && (adrs < ((5-1)*8))) {
+            adrs = adrs + 8;
+            readData(time, temp, adrs);
+            printData(time, temp[0]);
+        }
+        key_pressed = 0;
+    }
+    return;
+    
+    
+}
+void keypadInit() {
+    /* Configure ports 
+     * RA0 - row 1 (input)
+     * RB0 - col 1 (output)
+     * RB4 - led 1 (output)
+     */
+     
+    AD1PCFG = 0xfDff; 
+    TRISA = 0xffff;
+    TRISB = 0x0000;
+    LATB = 0xffff;
+    
+    /* Enable internal pullups
+     * RA0 - CN2 (CNPU1)
+     */
+    
+    CNPU1 = CNPU1 | 0x000C;
+    CNPU2 = CNPU2 | 0x6000;
+
+    
+    /* Enable interrupts and clear IRQ flag 
+     * RA0 - CN2 (CNEN1)
+     */
+    
+    CNEN1 = CNEN1 | 0x000C;
+    CNEN2 = CNEN2 | 0x6000;
+    IEC1bits.CNIE = 1; 
+    IFS1bits.CNIF = 0;
+ 
+    LATBbits.LATB4 = 0;
+    LATBbits.LATB5 = 0;
+    LATBbits.LATB7 = 0;
+}
+
+void testEeprom() {
+    int disp_data = 1;
+
+    
+    /* Write to EEPROM
+     * Store "CoE_115" in address 0x1000 of the EEPROM 
+     */
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b10100000);
+    
+    // send EEPROM high address
+    i2c_tx(0x10);
+    // send EEPROM low address
+    i2c_tx(0x00);
+    // send actual data; 
+    for(ind=0;ind<=strlen(indata);ind++){
+        i2c_tx(indata[ind]);
+    }
+    // send I2C stop sequence
+    
+    i2c_stop();
+    
+    delay_saks(5); //5ms delay_saks
+    /* Read from EEPROM
+     * Get data written previously in the EEPROM
+     */
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Write enabled
+    i2c_tx(0b10100000);
+    
+    // send EEPROM high address
+    //i2c_tx(0x01);
+    i2c_tx(0x10);
+    
+    // send EEPROM low address
+    //i2c_tx(0x40);
+    i2c_tx(0x00);
+    
+    // send I2C start sequence
+    i2c_start();
+    
+    // send EEPROM CTRL byte with Read enabled
+    i2c_tx(0b10100001);
+    
+    
+    ind = 0;
+    while(disp_data>0) {
+        // receive data
+        disp_data=i2c_rx();
+        outdata[ind] = disp_data;
+        ind++;
+        
+        if(disp_data>0){
+           sendAck();
+        }
+        
+    }
+    
+    
+    // send I2C stop sequence
+    delay_saks(10);
+    i2c_stop();     
+    
+    
+    temp = hash(outdata);
+    LCDinit();
+    print_char(outdata);
+}
+
+void updateLogTrack(int logTrack[]) {
+    /**updates the logTrack*/
+    if(!eepromFull) {
+        if((logTrack[1] + 8) < 8*100) {
+            logTrack[1] = logTrack[1] + 8;
+        } else {
+            eepromFull = 1;
+            logTrack[1] = 0;
+            logTrack[0] = logTrack[0] + 8;
+        }
+    } else {
+        if(((logTrack[0] + 8) < 8*100) && ((logTrack[0] + 8) < 800)) {
+            logTrack[1] = logTrack[1] + 8;
+            logTrack[0] = logTrack[0] + 8;
+        } else if(!((logTrack[0] + 8) < 800)) {
+            logTrack[1] = 0;
+            logTrack[0] = logTrack[0] + 8;
+        } else {
+            logTrack[1] = logTrack[1] + 8;
+            logTrack[0] = 0;
+        }
+    }
+    
+    return;
+}
+
+int chooseAdrs(int logTrack[]) {
+    /**chooses the next valid address to write in*/
+    int adrs = 0;
+    if((logTrack[1]+8) < 800) {
+        adrs = logTrack[1] + 8;
+    } else {
+        adrs = 0;
+    }
+    return adrs;
+}
+
+void printTimeFromRTC(int time[]) {
+    /**Prints all the time*/
+    
+    print_long(time[0]);
+    print_char(" ");
+    print_long(time[1]);
+    print_char(" ");
+    print_long(time[2]);
+    print_char(" ");
+    print_long(time[3]);
+    print_char(" ");
+    nextline();
+    print_long(time[4]);
+    print_char(" ");
+    print_long(time[5]);
+    print_char(" ");
+    print_long(time[6]);
+    print_char(" ");
+    
+    return;
+}
+
+long int absolute(long int value) {
+  if (value < 0) {
+    return -value;
+  }
+  else {
+    return value;  
+  }
+}
+
+void testDataLogMode() {
+    int time[7] = {0, 0, 0, 1, 1, 1, 0};
+    int secRef = 0;
+    int freq = 5;
+    int ind = 0;
+    int repeat = 0;     //repeat flag
+    
+    getTimeFromRTC(time);
+    secRef = time[0];
+    
+    
+    
+    while(1){  
+        /*
+        getTimeFromRTC(time);
+        clr();
+        printTimeFromRTC(time);
+        delay_saks(1000);
+        */
+       
+        
+    
+        if((((abs(secRef - time[0])) % freq) == 0) && (!repeat)){
+            getTimeFromRTC(time);
+            clr();
+            printTimeFromRTC(time);
+            secRef = time[0];
+            repeat = 1;
+        }
+        //    delay_saks(1000);
+        getTimeFromRTC(time);
+        if(time[0]!=secRef){
+            repeat = 0;
+        }
+
+    }
+
+    return;
+ 
+}
+
+void resetKey() {
+    col_press_id = 0;
+    row_press_id = 0;
+    return;
+}
+
+void dataLogMode(int freq, int logTrack[]) {
+    
+    int time[7] = {0, 0, 0, 1, 1, 1, 0};
+    float current_temp = 0;
+    int key = 0;
+    int secRef = 0;
+    int adrs = 0;
+    float adcfloat = 0;
+    int ind = 0;
+    
+    resetKey();
+    getTimeFromRTC(time);
+    secRef = time[0];
+    int repeat = 0;     //repeat flag
+    
+    while(key!=11){
+        getTimeFromRTC(time);
+        current_temp = adcvalue*33.5/102.4;
+        
+        if(((abs(secRef - time[0]) % freq) == 0) && (!repeat)){
+            adrs = chooseAdrs(logTrack);
+            writeData(time, current_temp, adrs);
+            updateLogTrack(logTrack);
+            printData(time, current_temp);
+            secRef = time[0];
+            repeat = 1;
+        }
+        
+        if(time[0]!=secRef){
+            repeat = 0;
+        }
+        key = get_key_press();
+    }
+   
+    return;
+}
+
+int main(void) {
+    
+    //int sampling_period = 0;
+    //float current_temp = 0;
+    float av_temp = 20.0;
+    int ind = 0;
+    int time[7] = {0, 0, 0, 1, 1, 1, 0};
+    int freq = 5;
+    //unsigned long int temp2store = 0;
+    //unsigned long int time2store = 0;
+    int logTrack[2] = {0};
+    //logTrack[0] = oldest log address
+    //logTrack[1] = latest log address
+    //time[0]   sec
+    //time[1]   min
+    //time[2]   hour
+    //time[3]   day of the week
+    //time[4]   date
+    //time[5]   Month
+    //time[6]   year
+    
+    keypadInit();
+    LCDinit();
+    ADC_init();
+    i2c_init();
+    
+    getInputTime(time);
+    writeTime(time);
+    freq = getInputFreq(time);
+    
+    
+    while(1) {
+        clr();
+        dataLogMode(freq, logTrack);
+        clr();
+        dataDisplayMode(logTrack);
+        clr();
+        
+    }
+    /*
+    for(ind=0; ind<5; ind++) {
+        time[1]++; 
+        av_temp = av_temp + 0.5;
+        writeData(time, av_temp, ind*8);
+    }*/
+    
+    return 0;
+}
