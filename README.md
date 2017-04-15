@@ -1,9 +1,9 @@
 # CoE115
 Lets go!
 
-getTimeFromRTC() does not work; It hangs. No fix yet.
+getTimeFromRTC() does not work; It hangs. It does not crash when read seldom.
 
-cannot toggle LED
+Used RA4 for LED toggle
 
 in choosing log frequency just press 1, 2, or 3,
 
