@@ -1,8 +1,8 @@
 /*
  * File:   main.c
- * Author: Snap
+ * Author: Uziel
  *
- * Created on February 20, 2017, 8:22 PM
+ * Created on April 16, 2017, 12:38 PM
  */
 
 
@@ -1838,7 +1838,7 @@ void setLogTrack(int logTrack[], int lastAdrs) {
         }
         adrsBuff = adrsBuff + 8;
     }
-    //its wrong but somehow it works
+
     logTrack[1] = adrsLatest;
     logTrack[0] = adrsOldest;
     return;
